@@ -15,6 +15,7 @@
 package router
 
 import (
+	"context"
 	"net"
 	"sync"
 
@@ -224,4 +225,8 @@ func (c *Connector) ListSiblingInterfaces() ([]control.SiblingInterface, error) 
 		siblingInterfaceList = append(siblingInterfaceList, siblingInterface)
 	}
 	return siblingInterfaceList, nil
+}
+
+func (c *Connector) Run(ctx context.Context) error {
+	return c.DataPlane.Run(ctx)
 }

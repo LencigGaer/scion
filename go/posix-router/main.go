@@ -35,6 +35,7 @@ import (
 	"github.com/scionproto/scion/go/pkg/router/api"
 	"github.com/scionproto/scion/go/pkg/router/config"
 	"github.com/scionproto/scion/go/pkg/router/control"
+	"github.com/scionproto/scion/go/pkg/router/xdp"
 	"github.com/scionproto/scion/go/pkg/service"
 )
 
@@ -56,10 +57,21 @@ func realMain(ctx context.Context) error {
 	}
 	g, errCtx := errgroup.WithContext(ctx)
 	metrics := router.NewMetrics()
-	dp := &router.Connector{
-		DataPlane: router.DataPlane{
-			Metrics: metrics,
-		},
+	var dp interface {
+		control.Dataplane
+		control.ObservableDataplane
+	}
+	// TODO: Add configuration option for selecting dataplane implementation
+	if false {
+		// regular data plane
+		dp = &router.Connector{
+			DataPlane: router.DataPlane{
+				Metrics: metrics,
+			},
+		}
+	} else {
+		// eBPF data plane
+		dp = &xdp.Connector{}
 	}
 	iaCtx := &control.IACtx{
 		Config: controlConfig,
@@ -121,7 +133,7 @@ func realMain(ctx context.Context) error {
 	})
 	g.Go(func() error {
 		defer log.HandlePanic()
-		if err := dp.DataPlane.Run(errCtx); err != nil {
+		if err := dp.Run(errCtx); err != nil {
 			return serrors.WrapStr("running dataplane", err)
 		}
 		return nil

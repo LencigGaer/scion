@@ -15,6 +15,7 @@
 package control
 
 import (
+	"context"
 	"net"
 	"sort"
 
@@ -36,6 +37,7 @@ type Dataplane interface {
 	DelSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error
 	SetKey(ia addr.IA, index int, key []byte) error
 	SetColibriKey(ia addr.IA, index int, key []byte) error
+	Run(ctx context.Context) error
 }
 
 // LinkInfo contains the information about a link between an internal and
