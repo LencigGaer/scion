@@ -15,8 +15,11 @@ import (
 type Connector struct {
 	fast Dataplane // fast-path
 	// TODO: Add slow-path
-	mtx sync.Mutex
-	ia  addr.IA
+	mtx                sync.Mutex
+	ia                 addr.IA
+	internalInterfaces []control.InternalInterface
+	externalInterfaces map[uint16]control.ExternalInterface
+	siblingInterfaces  map[uint16]control.SiblingInterface
 }
 
 var errMultiIA = serrors.New("different IA not allowed")
@@ -29,6 +32,7 @@ func (c *Connector) CreateIACtx(ia addr.IA) error {
 		return serrors.WithCtx(errMultiIA, "current", c.ia, "new", ia)
 	}
 	c.ia = ia
+	c.fast.SetIA(ia)
 	return nil
 }
 
@@ -36,6 +40,13 @@ func (c *Connector) AddInternalInterface(ia addr.IA, local net.UDPAddr) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Adding internal interface", "isd_as", ia, "local", local)
+	if !c.ia.Equal(ia) {
+		return serrors.WithCtx(errMultiIA, "current", c.ia, "new", ia)
+	}
+	c.internalInterfaces = append(c.internalInterfaces, control.InternalInterface{
+		IA:   ia,
+		Addr: &local,
+	})
 	if err := c.fast.AddInternalInterface(local); err != nil {
 		return err
 	}
@@ -53,13 +64,31 @@ func (c *Connector) AddExternalInterface(
 		"owned", owned, "bfd", !link.BFD.Disable)
 
 	if owned {
+		if len(c.externalInterfaces) == 0 {
+			c.externalInterfaces = make(map[uint16]control.ExternalInterface)
+		}
+		c.externalInterfaces[ifid] = control.ExternalInterface{
+			InterfaceID: ifid,
+			Link:        link,
+			State:       control.InterfaceDown,
+		}
 		err := c.fast.AddExternalInterface(ifid, *link.Local.Addr, *link.Remote.Addr)
 		if err != nil {
 			return err
 		}
 	} else {
-		err := c.fast.AddSiblingInterface(ifid, *link.Remote.Addr)
-		if err != nil {
+		if len(c.siblingInterfaces) == 0 {
+			c.siblingInterfaces = make(map[uint16]control.SiblingInterface)
+		}
+		c.siblingInterfaces[ifid] = control.SiblingInterface{
+			InterfaceID:       ifid,
+			InternalInterface: link.Remote.Addr,
+			Relationship:      link.LinkTo,
+			MTU:               link.MTU,
+			NeighborIA:        link.Remote.IA,
+			State:             control.InterfaceDown,
+		}
+		if err := c.fast.AddSiblingInterface(ifid, *link.Remote.Addr); err != nil {
 			return err
 		}
 	}
@@ -92,15 +121,34 @@ func (c *Connector) SetColibriKey(ia addr.IA, index int, key []byte) error {
 }
 
 func (c *Connector) ListInternalInterfaces() ([]control.InternalInterface, error) {
-	return make([]control.InternalInterface, 0), nil
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if len(c.internalInterfaces) == 0 {
+		return nil, serrors.New("internal interface is not set")
+	}
+	return c.internalInterfaces, nil
 }
 
 func (c *Connector) ListExternalInterfaces() ([]control.ExternalInterface, error) {
-	return make([]control.ExternalInterface, 0), nil
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	externalInterfaceList := make([]control.ExternalInterface, 0, len(c.externalInterfaces))
+	for _, externalInterface := range c.externalInterfaces {
+		// TODO: externalInterface.State = c.slow.getInterfaceState(externalInterface.InterfaceID)
+		externalInterfaceList = append(externalInterfaceList, externalInterface)
+	}
+	return externalInterfaceList, nil
 }
 
 func (c *Connector) ListSiblingInterfaces() ([]control.SiblingInterface, error) {
-	return make([]control.SiblingInterface, 0), nil
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	siblingInterfaceList := make([]control.SiblingInterface, 0, len(c.siblingInterfaces))
+	for _, siblingInterface := range c.siblingInterfaces {
+		// TODO: siblingInterface.State = c.slow.getInterfaceState(siblingInterface.InterfaceID)
+		siblingInterfaceList = append(siblingInterfaceList, siblingInterface)
+	}
+	return siblingInterfaceList, nil
 }
 
 func (c *Connector) Run(ctx context.Context) error {
