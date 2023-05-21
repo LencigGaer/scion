@@ -16,7 +16,7 @@ require (
 	github.com/golang/protobuf v1.5.2
 	github.com/google/go-cmp v0.5.9
 	github.com/google/go-containerregistry v0.5.1
-	github.com/google/gopacket v1.1.16-0.20190123011826-102d5ca2098c
+	github.com/google/gopacket v1.1.19
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
 	github.com/grpc-ecosystem/grpc-opentracing v0.0.0-20180507213350-8e809c8a8645
@@ -55,6 +55,7 @@ require (
 )
 
 require (
+	github.com/asavie/xdp v0.3.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/cespare/xxhash/v2 v2.1.1 // indirect

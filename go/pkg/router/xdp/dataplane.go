@@ -1,17 +1,20 @@
 package xdp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math/bits"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"unsafe"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/scionproto/scion/go/lib/addr"
@@ -26,22 +29,51 @@ import (
 // #define ENABLE_HF_CHECK
 // #define AF_INET 2
 // #define AF_INET6 10
+// #include "bpf/aes/aes.h"
 // #include "bpf/common.h"
 // #include <string.h>
+// #cgo LDFLAGS: /home/lars/scion/go/pkg/router/xdp/aes.o
 import "C"
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-target bpf -O2 -g -DXDP_DEBUG_PRINT -DENABLE_IPV4 -DENABLE_IPV6 -DENABLE_SCION_PATH -DENABLE_HF_CHECK" br bpf/router.c -- -I./bpf
+//go:generate gcc bpf/aes/aes.c -I./bpf -c -o aes.o
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-target bpf -O2 -g -DXDP_DEBUG_PRINT -DENABLE_IPV4 -DENABLE_IPV6 -DENABLE_SCION_PATH -DENABLE_HF_CHECK" br bpf/router.c bpf/aes/aes.c -- -I./bpf
+
+// Get a network interface by IP address.
+func interfaceByIp(ip net.IP) (*net.Interface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return nil, err
+		}
+		for _, addr := range addrs {
+			switch a := addr.(type) {
+			case *net.IPNet:
+				if a.IP.Equal(ip) {
+					return &iface, nil
+				}
+			default:
+				continue
+			}
+		}
+	}
+	return nil, fmt.Errorf("no interface with IP %v found", ip)
+}
 
 type forwardingMetrics struct {
 	ForwardedBytes   uint64
 	ForwardedPackets uint64
 }
 
-// A physical port of the border router with an underlying interface and its XDP hook.
-type Port struct {
-	netIf   net.Interface
-	link    link.Link
-	metrics forwardingMetrics
+// A port of the border router with an underlying interface and its XDP hook.
+type netInterface struct {
+	netIf   net.Interface     // Underlying network interface
+	link    link.Link         // Attached BPF program
+	xsks    map[int]int       // XDP socket FD for each queue
+	metrics forwardingMetrics // Forwarding metrics from XDP
 }
 
 // An internal interface is an interface to an AS-internal network.
@@ -64,16 +96,94 @@ type SiblingIface struct {
 	sibling net.UDPAddr
 }
 
+type brProgramsEx struct {
+	BorderRouter map[int]*ebpf.Program
+}
+
+type brMapsEx struct {
+	ROdata        *ebpf.Map
+	AES_SBox      *ebpf.Map
+	DebugRingbuf  *ebpf.Map
+	EgressMap     *ebpf.Map
+	IngressMap    *ebpf.Map
+	IntIfaceMap   *ebpf.Map
+	MacKeyMap     *ebpf.Map
+	PortStatsMap  *ebpf.Map
+	ScratchpadMap *ebpf.Map
+	TxPortMap     *ebpf.Map
+	XsksMaps      map[int]*ebpf.Map
+}
+
+type brObjsEx struct {
+	brProgramsEx
+	brMapsEx
+}
+
+func (o *brObjsEx) close() {
+	var err error
+	if err = o.ROdata.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.AES_SBox.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.DebugRingbuf.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.EgressMap.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.IngressMap.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.IntIfaceMap.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.MacKeyMap.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.PortStatsMap.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.ScratchpadMap.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	if err = o.TxPortMap.Close(); err != nil {
+		log.Error("Closing bpf map FD failed", "err", err)
+	}
+	for ifindex, m := range o.XsksMaps {
+		if err = m.Close(); err != nil {
+			log.Error("Closing bpf map FD failed", "err", err)
+		}
+		delete(o.XsksMaps, ifindex)
+	}
+	for ifindex, prog := range o.BorderRouter {
+		if err = prog.Close(); err != nil {
+			log.Error("Closing bpf program FD failed", "err", err)
+		}
+		delete(o.BorderRouter, ifindex)
+	}
+}
+
 // XDP in-kernel fast-path border router.
 type Dataplane struct {
 	localIA     addr.IA
-	ports       map[int]Port
+	netIfs      map[int]netInterface
 	internalIfs []InternalIface
 	externalIfs []ExternalIface
 	siblingIfs  []SiblingIface
 	hfKeys      [8][16]byte
 	running     bool
-	bpfObjs     brObjects
+	bpfObjs     brObjsEx
+}
+
+// Return a slice of all network interface indices the XDP dataplane will attach to.
+func (d *Dataplane) GetIFindices() []int {
+	var ifidxs = make([]int, 0, len(d.netIfs))
+	for ifindex := range d.netIfs {
+		ifidxs = append(ifidxs, ifindex)
+	}
+	return ifidxs
 }
 
 // Set address of the local AS.
@@ -85,12 +195,12 @@ func (d *Dataplane) SetIA(ia addr.IA) {
 // Add an internal interface.
 // Must be called before Run().
 func (d *Dataplane) AddInternalInterface(local net.UDPAddr) error {
-	ifindex, err := d.addXdpInterfaceByIp(local.IP)
+	iface, err := d.addNetInterfaceByIp(local.IP)
 	if err != nil {
 		return err
 	}
 	d.internalIfs = append(d.internalIfs, InternalIface{
-		ifindex: ifindex,
+		ifindex: iface.netIf.Index,
 		local:   local,
 	})
 	return nil
@@ -99,13 +209,13 @@ func (d *Dataplane) AddInternalInterface(local net.UDPAddr) error {
 // Add an external interface belonging to this BR.
 // Must be called before Run().
 func (d *Dataplane) AddExternalInterface(ifid uint16, local net.UDPAddr, remote net.UDPAddr) error {
-	ifindex, err := d.addXdpInterfaceByIp(local.IP)
+	iface, err := d.addNetInterfaceByIp(local.IP)
 	if err != nil {
 		return err
 	}
 	d.externalIfs = append(d.externalIfs, ExternalIface{
 		ifid:    ifid,
-		ifindex: ifindex,
+		ifindex: iface.netIf.Index,
 		local:   local,
 		remote:  remote,
 	})
@@ -122,6 +232,33 @@ func (d *Dataplane) AddSiblingInterface(ifid uint16, owner net.UDPAddr) error {
 	return nil
 }
 
+// Register an XDP socket for receiving packets that cannot be handled in eBPF.
+// Must be called before Run().
+func (d *Dataplane) RegisterXdpSocket(ifindex int, qid int, fd int) error {
+	iface, err := d.addNetInterface(ifindex)
+	if err != nil {
+		return err
+	}
+	iface.xsks[qid] = fd
+	if d.running {
+		return d.bpfObjs.XsksMaps[ifindex].Put(qid, fd)
+	}
+	return nil
+}
+
+// Unregister an XDP socket from the given queue.
+// Must be called before Run().
+func (d *Dataplane) UnregisterXdpSocket(ifindex int, qid int) error {
+	iface, ok := d.netIfs[ifindex]
+	if ok {
+		delete(iface.xsks, qid)
+		if d.running {
+			return d.bpfObjs.XsksMaps[ifindex].Delete(qid)
+		}
+	}
+	return nil
+}
+
 // Set hop field verification key.
 // Keys can be updated while the dataplane is running.
 func (d *Dataplane) SetKey(index int, key []byte) error {
@@ -135,13 +272,123 @@ func (d *Dataplane) SetKey(index int, key []byte) error {
 func (d *Dataplane) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 
-	// Load BPF programs and maps
-	err := loadBrObjects(&d.bpfObjs, nil)
+	// Load program and map specs from ELF file
+	spec, err := loadBr()
 	if err != nil {
-		log.Error("Failed to load BPF objects", "err", err)
+		return serrors.WrapStr("failed to load BPF objects", err)
+	}
+
+	// Make sure all BPF objects will be closed
+	defer d.bpfObjs.close()
+
+	// Instantiate shared maps
+	if d.bpfObjs.ROdata, err = ebpf.NewMap(spec.Maps[".rodata"]); err != nil {
 		return err
 	}
-	defer d.bpfObjs.Close()
+	if d.bpfObjs.AES_SBox, err = ebpf.NewMap(spec.Maps["AES_SBox"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.DebugRingbuf, err = ebpf.NewMap(spec.Maps["debug_ringbuf"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.EgressMap, err = ebpf.NewMap(spec.Maps["egress_map"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.IngressMap, err = ebpf.NewMap(spec.Maps["ingress_map"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.IntIfaceMap, err = ebpf.NewMap(spec.Maps["int_iface_map"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.MacKeyMap, err = ebpf.NewMap(spec.Maps["mac_key_map"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.PortStatsMap, err = ebpf.NewMap(spec.Maps["port_stats_map"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.ScratchpadMap, err = ebpf.NewMap(spec.Maps["scratchpad_map"]); err != nil {
+		return err
+	}
+	if d.bpfObjs.TxPortMap, err = ebpf.NewMap(spec.Maps["tx_port_map"]); err != nil {
+		return err
+	}
+
+	// Instantiate per-interface maps
+	if d.bpfObjs.XsksMaps == nil {
+		d.bpfObjs.XsksMaps = make(map[int]*ebpf.Map)
+	}
+	xsksMapSpec := spec.Maps["xsks_map"]
+	for ifindex, iface := range d.netIfs {
+		xsksMapSpec.Name = fmt.Sprintf("xsks_map_%d", ifindex)
+		xsksMapSpec.Contents = make([]ebpf.MapKV, 0, len(iface.xsks))
+		if iface.xsks != nil {
+			for qid, fd := range iface.xsks {
+				xsksMapSpec.Contents = append(xsksMapSpec.Contents,
+					ebpf.MapKV{Key: (uint32)(qid), Value: (uint32)(fd)})
+			}
+		}
+		m, err := ebpf.NewMap(xsksMapSpec)
+		if err != nil {
+			return err
+		}
+		d.bpfObjs.XsksMaps[ifindex] = m
+	}
+
+	// Instantiate a custom program for each interface
+	if d.bpfObjs.BorderRouter == nil {
+		d.bpfObjs.BorderRouter = make(map[int]*ebpf.Program)
+	}
+	for ifindex := range d.netIfs {
+		brSpec := spec.Programs["border_router"].Copy()
+		brSpec.Name = fmt.Sprintf("border_router_%d", ifindex)
+
+		// Rewrite map references
+		for i := range brSpec.Instructions {
+			ins := &brSpec.Instructions[i]
+			ref := ins.Reference()
+			if !ins.IsLoadFromMap() || ref == "" {
+				continue
+			}
+			switch ref {
+			case ".rodata":
+				ins.AssociateMap(d.bpfObjs.ROdata)
+			case "AES_SBox":
+				ins.AssociateMap(d.bpfObjs.AES_SBox)
+			case "debug_ringbuf":
+				ins.AssociateMap(d.bpfObjs.DebugRingbuf)
+			case "egress_map":
+				ins.AssociateMap(d.bpfObjs.EgressMap)
+			case "ingress_map":
+				ins.AssociateMap(d.bpfObjs.IngressMap)
+			case "int_iface_map":
+				ins.AssociateMap(d.bpfObjs.IntIfaceMap)
+			case "mac_key_map":
+				ins.AssociateMap(d.bpfObjs.MacKeyMap)
+			case "port_stats_map":
+				ins.AssociateMap(d.bpfObjs.PortStatsMap)
+			case "scratchpad_map":
+				ins.AssociateMap(d.bpfObjs.ScratchpadMap)
+			case "tx_port_map":
+				ins.AssociateMap(d.bpfObjs.TxPortMap)
+			case "xsks_map":
+				ins.AssociateMap(d.bpfObjs.XsksMaps[ifindex])
+			default:
+				return fmt.Errorf("unsatisfied reference in program %s to %s", brSpec.Name, ref)
+			}
+		}
+
+		prog, err := ebpf.NewProgramWithOptions(brSpec, ebpf.ProgramOptions{
+			LogLevel:    ebpf.LogLevelStats,
+			LogSize:     ebpf.DefaultVerifierLogSize,
+			LogDisabled: false,
+		})
+		if err != nil {
+			return err
+		}
+
+		log.Debug(fmt.Sprint("BPF Verifier:\n", prog.VerifierLog))
+		d.bpfObjs.BorderRouter[ifindex] = prog
+	}
 
 	// Initialize BPF maps
 	err = d.writeSBox()
@@ -173,23 +420,23 @@ func (d *Dataplane) Run(ctx context.Context) error {
 		return serrors.WrapStr("writing to scratchpad_map failed", err)
 	}
 	for i, key := range d.hfKeys {
-		err = d.writeHfKey(i, key)
-		if err != nil {
+		if err = d.writeHfKey(i, key); err != nil {
 			return serrors.WrapStr("writing to mac_key_map failed", err, "index", i)
 		}
 	}
 
 	// Attach to interfaces
-	for index, port := range d.ports {
+	for ifindex, iface := range d.netIfs {
+		log.Debug(fmt.Sprintf("Attach BPF program to interface %d", ifindex))
 		lnk, err := link.AttachXDP(link.XDPOptions{
-			Program:   d.bpfObjs.BorderRouter,
-			Interface: index,
+			Program:   d.bpfObjs.BorderRouter[ifindex],
+			Interface: ifindex,
 		})
 		if err != nil {
 			log.Error("Attaching to XDP hook failed", "err", err)
 			continue
 		}
-		port.link = lnk
+		iface.link = lnk
 	}
 
 	// Launch goroutine for reading from debug ringbuf
@@ -209,7 +456,9 @@ func (d *Dataplane) Run(ctx context.Context) error {
 					log.Error("Reading from ringbuf reader failed", "err", err)
 					continue
 				}
-				log.Debug(fmt.Sprint("XDP:", record.RawSample))
+				null := bytes.Index(record.RawSample, []byte{0})
+				msg := strings.TrimRight(string(record.RawSample[:null]), "\n")
+				log.Debug(fmt.Sprintf("XDP: %s", msg))
 			}
 		}()
 	}
@@ -230,13 +479,14 @@ func (d *Dataplane) Run(ctx context.Context) error {
 	<-ctx.Done()
 
 	// Detach XDP
-	for _, port := range d.ports {
-		if port.link != nil {
-			err := port.link.Close()
+	for ifindex, iface := range d.netIfs {
+		log.Debug(fmt.Sprintf("Detach BPF program from interface %d", ifindex))
+		if iface.link != nil {
+			err := iface.link.Close()
 			if err != nil {
 				log.Error("Detaching XDP program failed", "err", err)
 			}
-			port.link = nil
+			iface.link = nil
 		}
 	}
 
@@ -250,52 +500,39 @@ func (d *Dataplane) Run(ctx context.Context) error {
 	return nil
 }
 
-func interfaceByIp(ip net.IP) (*net.Interface, error) {
-	ifaces, err := net.Interfaces()
+// Add a network interface to the border router.
+func (d *Dataplane) addNetInterface(ifindex int) (*netInterface, error) {
+	iface, present := d.netIfs[ifindex]
+	if !present {
+		log.Debug("Add interface for XDP attachment", "interface", iface)
+		if d.netIfs == nil {
+			d.netIfs = make(map[int]netInterface)
+		}
+		netIf, err := net.InterfaceByIndex(ifindex)
+		if err != nil {
+			return nil, serrors.WrapStr("interface not found", err)
+		}
+		d.netIfs[ifindex] = netInterface{
+			netIf: *netIf,
+			xsks:  make(map[int]int),
+		}
+		iface = d.netIfs[ifindex]
+	}
+	return &iface, nil
+}
+
+// Add a network interface by IP address.
+func (d *Dataplane) addNetInterfaceByIp(ip net.IP) (*netInterface, error) {
+	netIf, err := interfaceByIp(ip)
 	if err != nil {
 		return nil, err
 	}
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			return nil, err
-		}
-		for _, addr := range addrs {
-			switch a := addr.(type) {
-			case *net.IPNet:
-				if a.IP.Equal(ip) {
-					return &iface, nil
-				}
-			default:
-				continue
-			}
-		}
-	}
-	return nil, fmt.Errorf("no interface with IP %v found", ip)
-}
-
-func (d *Dataplane) addXdpInterfaceByIp(ip net.IP) (int, error) {
-	iface, err := interfaceByIp(ip)
-	if err != nil {
-		return 0, err
-	}
-	_, present := d.ports[iface.Index]
-	if !present {
-		log.Debug("Add interface for XDP attachment", "interface", iface)
-		if d.ports == nil {
-			d.ports = make(map[int]Port)
-		}
-		d.ports[iface.Index] = Port{
-			netIf: *iface,
-			link:  nil,
-		}
-	}
-	return iface.Index, nil
+	return d.addNetInterface(netIf.Index)
 }
 
 // Write AES SBox for MAC calculation.
 func (d *Dataplane) writeSBox() error {
-	return d.bpfObjs.AES_SBox.Update(0, C.AES_SBox, 0)
+	return d.bpfObjs.AES_SBox.Put((uint32)(0), C.AES_SBox)
 }
 
 // Write map for matching ingress packets against BR interfaces.
@@ -311,7 +548,7 @@ func (d *Dataplane) writeIngressMap() error {
 		} else {
 			C.memcpy(unsafe.Pointer(&key.ipv6), unsafe.Pointer(&ext.local.IP[0]), 16)
 		}
-		err := d.bpfObjs.IngressMap.Update(key, (uint32)(ext.ifid), 0)
+		err := d.bpfObjs.IngressMap.Put(key, (uint32)(ext.ifid))
 		if err != nil {
 			return err
 		}
@@ -342,7 +579,7 @@ func (d *Dataplane) writeEgressMap() error {
 		}
 		link.remote_port = C.ushort(bits.ReverseBytes16((uint16)(ext.remote.Port)))
 		link.local_port = C.ushort(bits.ReverseBytes16((uint16)(ext.local.Port)))
-		err := d.bpfObjs.EgressMap.Update((uint32)(ext.ifid), value, 0)
+		err := d.bpfObjs.EgressMap.Put((uint32)(ext.ifid), value)
 		if err != nil {
 			return err
 		}
@@ -363,7 +600,7 @@ func (d *Dataplane) writeEgressMap() error {
 			C.memcpy(unsafe.Pointer(&sibling.anon0[0]), unsafe.Pointer(&sib.sibling.IP[0]), 16)
 		}
 		sibling.port = C.ushort(bits.ReverseBytes16((uint16)(sib.sibling.Port)))
-		err := d.bpfObjs.EgressMap.Update((uint32)(sib.ifid), value, 0)
+		err := d.bpfObjs.EgressMap.Put((uint32)(sib.ifid), value)
 		if err != nil {
 			return err
 		}
@@ -385,7 +622,7 @@ func (d *Dataplane) writeIntIfMap() error {
 			C.memcpy(unsafe.Pointer(&value.anon0[0]), unsafe.Pointer(&intIf.local.IP[0]), 16)
 		}
 		value.port = C.ushort(bits.ReverseBytes16((uint16)(intIf.local.Port)))
-		err := d.bpfObjs.IntIfaceMap.Update((uint32)(intIf.ifindex), value, 0)
+		err := d.bpfObjs.IntIfaceMap.Put((uint32)(intIf.ifindex), value)
 		if err != nil {
 			return err
 		}
@@ -396,13 +633,13 @@ func (d *Dataplane) writeIntIfMap() error {
 // Write one-to-one mapping of redirection port to interface for XDP_REDIRECT.
 func (d *Dataplane) writeTxPortMap() error {
 	for _, ext := range d.externalIfs {
-		err := d.bpfObjs.TxPortMap.Update(ext.ifindex, ext.ifindex, 0)
+		err := d.bpfObjs.TxPortMap.Put((uint32)(ext.ifindex), (uint32)(ext.ifindex))
 		if err != nil {
 			return err
 		}
 	}
 	for _, intIf := range d.internalIfs {
-		err := d.bpfObjs.TxPortMap.Update(intIf.ifindex, intIf.ifindex, 0)
+		err := d.bpfObjs.TxPortMap.Put((uint32)(intIf.ifindex), (uint32)(intIf.ifindex))
 		if err != nil {
 			return err
 		}
@@ -412,11 +649,11 @@ func (d *Dataplane) writeTxPortMap() error {
 
 // Overwrite all known interface entries in the statistics map with zeros.
 func (d *Dataplane) resetPortStatsMap() error {
-	for ifindex := range d.ports {
+	for ifindex := range d.netIfs {
 		// FIXME: runtime.NumCPU() is the number of CPUs usable for Go at program startup,
 		// not the number of CPUs currently online in the system
 		value := make([]C.struct_port_stats, runtime.NumCPU())
-		err := d.bpfObjs.PortStatsMap.Update(ifindex, value, 0)
+		err := d.bpfObjs.PortStatsMap.Put((uint32)(ifindex), value)
 		if err != nil {
 			return err
 		}
@@ -433,7 +670,7 @@ func (d *Dataplane) initScratchpad() error {
 		scratchpad.local_as = C.ulonglong(d.localIA)
 		scratchpad.host_port = C.uint(topology.EndhostPort)
 	}
-	return d.bpfObjs.ScratchpadMap.Update(0, value, 0)
+	return d.bpfObjs.ScratchpadMap.Put((uint32)(0), value)
 }
 
 // Expand and write a hop field verification key to the slot given by index.
@@ -447,21 +684,26 @@ func (d *Dataplane) writeHfKey(index int, key [16]byte) error {
 	C.aes_key_expansion(&aesKey, &hopKey.key)
 	C.aes_cmac_subkeys(&hopKey.key, &subkeys[0])
 	copy(hopKey.subkey.anon0[:], subkeys[1].anon0[:16])
-	return d.bpfObjs.MacKeyMap.Update(index, hopKey, 0)
+	return d.bpfObjs.MacKeyMap.Put((uint32)(index), hopKey)
 }
 
 // Read port metrics from XDP dataplane.
 func (d *Dataplane) readPortStats() error {
-	for ifindex, port := range d.ports {
-		value := make([]C.struct_port_stats, runtime.NumCPU())
-		if err := d.bpfObjs.PortStatsMap.Lookup(ifindex, value); err != nil {
+	// Fields must be exported
+	type portStats struct {
+		Bytes   [11]uint64
+		Packets [11]uint64
+	}
+	for ifindex, port := range d.netIfs {
+		value := make([]portStats, runtime.NumCPU())
+		if err := d.bpfObjs.PortStatsMap.Lookup((uint32)(ifindex), &value); err != nil {
 			return err
 		}
 		port.metrics.ForwardedBytes = 0
 		port.metrics.ForwardedPackets = 0
 		for _, stats := range value {
-			port.metrics.ForwardedBytes += (uint64)(stats.verdict_bytes[C.COUNTER_SCION_FORWARD])
-			port.metrics.ForwardedPackets += (uint64)(stats.verdict_pkts[C.COUNTER_SCION_FORWARD])
+			port.metrics.ForwardedBytes += (uint64)(stats.Bytes[C.COUNTER_SCION_FORWARD])
+			port.metrics.ForwardedPackets += (uint64)(stats.Packets[C.COUNTER_SCION_FORWARD])
 		}
 	}
 	return nil

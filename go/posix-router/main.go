@@ -61,17 +61,20 @@ func realMain(ctx context.Context) error {
 		control.Dataplane
 		control.ObservableDataplane
 	}
-	// TODO: Add configuration option for selecting dataplane implementation
-	if false {
+	if controlConfig.BR.Dataplane == "Go" {
 		// regular data plane
 		dp = &router.Connector{
 			DataPlane: router.DataPlane{
 				Metrics: metrics,
 			},
 		}
-	} else {
+	} else if controlConfig.BR.Dataplane == "XDP" {
 		// eBPF data plane
 		dp = &xdp.Connector{}
+	} else if controlConfig.BR.Dataplane == "Tofino" {
+		return fmt.Errorf("tofino dataplane not implemented")
+	} else {
+		return fmt.Errorf("unknown dataplane implementation requested")
 	}
 	iaCtx := &control.IACtx{
 		Config: controlConfig,
