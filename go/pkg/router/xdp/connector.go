@@ -13,10 +13,10 @@ import (
 )
 
 type Connector struct {
-	fast Dataplane // fast-path
-	// TODO: Add slow-path
-	mtx sync.Mutex
-	ia  addr.IA
+	fast Dataplane         // fast-path
+	slow ConnectorSlowPath // slow-path
+	mtx  sync.Mutex
+	ia   addr.IA
 }
 
 var errMultiIA = serrors.New("different IA not allowed")
@@ -29,7 +29,7 @@ func (c *Connector) CreateIACtx(ia addr.IA) error {
 		return serrors.WithCtx(errMultiIA, "current", c.ia, "new", ia)
 	}
 	c.ia = ia
-	return nil
+	return c.slow.CreateIACtx(ia)
 }
 
 func (c *Connector) AddInternalInterface(ia addr.IA, local net.UDPAddr) error {
@@ -39,7 +39,7 @@ func (c *Connector) AddInternalInterface(ia addr.IA, local net.UDPAddr) error {
 	if err := c.fast.AddInternalInterface(local); err != nil {
 		return err
 	}
-	return nil
+	return c.slow.AddInternalInterface(ia, local)
 }
 
 func (c *Connector) AddExternalInterface(
@@ -64,31 +64,31 @@ func (c *Connector) AddExternalInterface(
 		}
 	}
 
-	return nil
+	return c.slow.AddExternalInterface(localIfID, link, owned)
 }
 
 func (c *Connector) AddSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Adding service", "isd_as", ia, "svc", svc, "ip", ip)
-	return nil
+	return c.slow.AddSvc(ia, svc, ip)
 }
 
 func (c *Connector) DelSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Deleting service", "isd_as", ia, "svc", svc, "ip", ip)
-	return nil
+	return c.slow.DelSvc(ia, svc, ip)
 }
 
 func (c *Connector) SetKey(ia addr.IA, index int, key []byte) error {
 	log.Debug("Setting key", "isd_as", ia, "index", index)
-	return nil
+	return c.slow.SetKey(ia, index, key)
 }
 
 func (c *Connector) SetColibriKey(ia addr.IA, index int, key []byte) error {
 	log.Debug("Setting Colibri key", "isd_as", ia, "index", index)
-	return nil
+	return c.slow.SetColibriKey(ia, index, key)
 }
 
 func (c *Connector) ListInternalInterfaces() ([]control.InternalInterface, error) {

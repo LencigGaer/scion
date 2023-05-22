@@ -1,23 +1,15 @@
-// Copyright 2020 Anapaya Systems
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-package router
+package xdp
 
 import (
 	"context"
 	"net"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
+
+	"github.com/asavie/xdp"
+	"github.com/vishvananda/netlink"
 
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/common"
@@ -25,16 +17,25 @@ import (
 	"github.com/scionproto/scion/go/lib/serrors"
 	"github.com/scionproto/scion/go/lib/topology"
 	"github.com/scionproto/scion/go/lib/underlay/conn"
+	"github.com/scionproto/scion/go/pkg/router"
 	"github.com/scionproto/scion/go/pkg/router/control"
 )
+
+// Currently, the slow path is simply a wrapper for the normal go border router
 
 // receiveBufferSize is the size of receive buffers used by the router.
 const receiveBufferSize = 1 << 20
 
-// Connector implements the Dataplane API of the router control process. It sets
-// up connections for the DataPlane.
-type Connector struct {
-	DataPlane DataPlane
+type XdpObject struct {
+	xsk       *xdp.Socket
+	program   *xdp.Program
+	link      netlink.Link
+	local     net.Addr
+	batchConn conn.Conn
+}
+
+type ConnectorSlowPath struct {
+	DataPlane router.DataPlane
 
 	ia                 addr.IA
 	mtx                sync.Mutex
@@ -43,10 +44,105 @@ type Connector struct {
 	siblingInterfaces  map[uint16]control.SiblingInterface
 }
 
-var errMultiIA = serrors.New("different IA not allowed")
+/*******************
+ ** AF_XDP Helper **
+ *******************/
+
+// Create XDP socket
+func (x *XdpObject) CreateXdp(local net.UDPAddr) error {
+	// Save network address
+	x.local = &local
+
+	// Get interface name from IP
+	iface, err := interfaceByIp(local.IP)
+	if err != nil {
+		return err
+	}
+
+	// Init queue ID
+	queueId := 0
+
+	// Get link to which the XDP program should be attached
+	x.link, err = netlink.LinkByName(iface.Name)
+	if err != nil {
+		return err
+	}
+
+	// Create and attach XDP program
+	x.program, err = xdp.NewProgram(queueId + 1)
+	if err != nil {
+		return err
+	}
+	if err := x.program.Attach(x.link.Attrs().Index); err != nil {
+		return err
+	}
+	x.xsk, err = xdp.NewSocket(x.link.Attrs().Index, queueId, nil)
+	if err != nil {
+		return err
+	}
+
+	// Detach XDP in case of interrupt
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		x.program.Detach((x.link.Attrs().Index))
+		os.Exit(1)
+	}()
+
+	// Create normal batch connection for sending
+	x.batchConn, err = conn.New(&local, nil,
+		&conn.Config{ReceiveBufferSize: receiveBufferSize})
+	if err != nil {
+		return err
+	}
+	return x.program.Register(queueId, x.xsk.FD())
+}
+
+// Read batch from XDP socket
+func (x *XdpObject) ReadBatch(msg conn.Messages) (int, error) {
+	x.xsk.Fill(x.xsk.GetDescs(len(msg)))
+	numRx, _, err := x.xsk.Poll(-1)
+	if err != nil {
+		return 0, err
+	}
+	var rxDesc []xdp.Desc
+	if numRx >= len(msg) {
+		rxDesc = x.xsk.Receive(len(msg))
+	} else {
+		rxDesc = x.xsk.Receive(numRx)
+	}
+	for i := 0; i < len(rxDesc); i++ {
+		raw_pkt := x.xsk.GetFrame(rxDesc[i])
+		msg[i].Buffers[0] = raw_pkt
+		msg[i].Addr = x.local
+		msg[i].N = len(raw_pkt)
+	}
+	return len(rxDesc), nil
+}
+
+// Write bytes to interface
+func (x *XdpObject) WriteTo(raw_pkt []byte, address *net.UDPAddr) (int, error) {
+	return x.batchConn.WriteTo(raw_pkt, address)
+}
+
+// Write batch to interface
+func (x *XdpObject) WriteBatch(msgs conn.Messages, flags int) (int, error) {
+	return x.batchConn.WriteBatch(msgs, flags)
+}
+
+// Detach XDP prog and close connection
+func (x *XdpObject) Close() error {
+	x.program.Detach(x.link.Attrs().Index)
+	return x.batchConn.Close()
+}
+
+/******************
+ ** Dataplane IF **
+ ******************/
 
 // CreateIACtx creates the context for ISD-AS.
-func (c *Connector) CreateIACtx(ia addr.IA) error {
+func (c *ConnectorSlowPath) CreateIACtx(ia addr.IA) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("CreateIACtx", "isd_as", ia)
@@ -58,15 +154,15 @@ func (c *Connector) CreateIACtx(ia addr.IA) error {
 }
 
 // AddInternalInterface adds the internal interface.
-func (c *Connector) AddInternalInterface(ia addr.IA, local net.UDPAddr) error {
+func (c *ConnectorSlowPath) AddInternalInterface(ia addr.IA, local net.UDPAddr) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Adding internal interface", "isd_as", ia, "local", local)
 	if !c.ia.Equal(ia) {
 		return serrors.WithCtx(errMultiIA, "current", c.ia, "new", ia)
 	}
-	connection, err := conn.New(&local, nil,
-		&conn.Config{ReceiveBufferSize: receiveBufferSize})
+	connection := new(XdpObject)
+	err := connection.CreateXdp(local)
 	if err != nil {
 		return err
 	}
@@ -78,7 +174,7 @@ func (c *Connector) AddInternalInterface(ia addr.IA, local net.UDPAddr) error {
 }
 
 // AddExternalInterface adds a link between the local and remote address.
-func (c *Connector) AddExternalInterface(localIfID common.IFIDType, link control.LinkInfo,
+func (c *ConnectorSlowPath) AddExternalInterface(localIfID common.IFIDType, link control.LinkInfo,
 	owned bool) error {
 
 	c.mtx.Lock()
@@ -130,8 +226,8 @@ func (c *Connector) AddExternalInterface(localIfID common.IFIDType, link control
 		return c.DataPlane.AddNextHop(intf, link.Remote.Addr)
 	}
 
-	connection, err := conn.New(link.Local.Addr, link.Remote.Addr,
-		&conn.Config{ReceiveBufferSize: receiveBufferSize})
+	connection := new(XdpObject)
+	err := connection.CreateXdp(*link.Local.Addr)
 	if err != nil {
 		return err
 	}
@@ -146,7 +242,7 @@ func (c *Connector) AddExternalInterface(localIfID common.IFIDType, link control
 }
 
 // AddSvc adds the service address for the given ISD-AS.
-func (c *Connector) AddSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
+func (c *ConnectorSlowPath) AddSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Adding service", "isd_as", ia, "svc", svc, "ip", ip)
@@ -157,7 +253,7 @@ func (c *Connector) AddSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
 }
 
 // DelSvc deletes the service entry for the given ISD-AS and IP pair.
-func (c *Connector) DelSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
+func (c *ConnectorSlowPath) DelSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Deleting service", "isd_as", ia, "svc", svc, "ip", ip)
@@ -168,7 +264,7 @@ func (c *Connector) DelSvc(ia addr.IA, svc addr.HostSVC, ip net.IP) error {
 }
 
 // SetKey sets the key for the given ISD-AS at the given index.
-func (c *Connector) SetKey(ia addr.IA, index int, key []byte) error {
+func (c *ConnectorSlowPath) SetKey(ia addr.IA, index int, key []byte) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Setting key", "isd_as", ia, "index", index)
@@ -182,7 +278,7 @@ func (c *Connector) SetKey(ia addr.IA, index int, key []byte) error {
 }
 
 // SetColibriKey sets the Colibri key for the given ISD-AS at the given index.
-func (c *Connector) SetColibriKey(ia addr.IA, index int, key []byte) error {
+func (c *ConnectorSlowPath) SetColibriKey(ia addr.IA, index int, key []byte) error {
 	log.Debug("Setting key", "isd_as", ia, "index", index)
 	if !c.ia.Equal(ia) {
 		return serrors.WithCtx(errMultiIA, "current", c.ia, "new", ia)
@@ -193,7 +289,7 @@ func (c *Connector) SetColibriKey(ia addr.IA, index int, key []byte) error {
 	return c.DataPlane.SetColibriKey(key)
 }
 
-func (c *Connector) ListInternalInterfaces() ([]control.InternalInterface, error) {
+func (c *ConnectorSlowPath) ListInternalInterfaces() ([]control.InternalInterface, error) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
@@ -203,7 +299,7 @@ func (c *Connector) ListInternalInterfaces() ([]control.InternalInterface, error
 	return c.internalInterfaces, nil
 }
 
-func (c *Connector) ListExternalInterfaces() ([]control.ExternalInterface, error) {
+func (c *ConnectorSlowPath) ListExternalInterfaces() ([]control.ExternalInterface, error) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
@@ -215,7 +311,7 @@ func (c *Connector) ListExternalInterfaces() ([]control.ExternalInterface, error
 	return externalInterfaceList, nil
 }
 
-func (c *Connector) ListSiblingInterfaces() ([]control.SiblingInterface, error) {
+func (c *ConnectorSlowPath) ListSiblingInterfaces() ([]control.SiblingInterface, error) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
@@ -227,6 +323,6 @@ func (c *Connector) ListSiblingInterfaces() ([]control.SiblingInterface, error) 
 	return siblingInterfaceList, nil
 }
 
-func (c *Connector) Run(ctx context.Context) error {
+func (c *ConnectorSlowPath) Run(ctx context.Context) error {
 	return c.DataPlane.Run(ctx)
 }
