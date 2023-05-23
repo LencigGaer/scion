@@ -90,6 +90,8 @@ type (
 	BRInfo struct {
 		Name string
 		// InternalAddr is the local data-plane address.
+		Dataplane string
+		// Dataplane selects the data-plane implementation ("Go", "XDP", "Tofino")
 		InternalAddr *net.UDPAddr
 		// IFIDs is a sorted list of the interface IDs.
 		IFIDs []common.IFIDType
@@ -208,6 +210,10 @@ func (t *RWTopology) populateMeta(raw *jsontopo.Topology) error {
 
 func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 	for name, rawBr := range raw.BorderRouters {
+		dataplane := rawBr.Dataplane
+		if dataplane == "" {
+			dataplane = "Go"
+		}
 		if rawBr.InternalAddr == "" {
 			return serrors.New("Missing Internal Address", "br", name)
 		}
@@ -217,6 +223,7 @@ func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 		}
 		brInfo := BRInfo{
 			Name:         name,
+			Dataplane:    dataplane,
 			InternalAddr: intAddr,
 			IFs:          make(map[common.IFIDType]*IFInfo),
 		}

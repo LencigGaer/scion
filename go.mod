@@ -55,7 +55,7 @@ require (
 )
 
 require (
-	github.com/asavie/xdp v0.3.3
+	github.com/asavie/xdp v0.3.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/cespare/xxhash/v2 v2.1.1 // indirect

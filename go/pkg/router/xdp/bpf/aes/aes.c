@@ -30,7 +30,7 @@
 /// RFC 4493 (AES-CMAC): https://datatracker.ietf.org/doc/html/rfc4493
 /// AES Implementation in C: https://github.com/kokke/tiny-AES-c
 
-// #include "aes/aes.h"
+#include "aes/aes.h"
 
 #ifdef __bpf__
     #include "bpf/types.h"

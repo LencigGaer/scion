@@ -75,6 +75,14 @@ struct {
 } mac_key_map SEC(".maps");
 #endif
 
+/// \brief Map for redirecting to AF_XDP sockets.
+struct {
+    __uint(type, BPF_MAP_TYPE_XSKMAP);
+    __uint(key_size, sizeof(u32));
+    __uint(value_size, sizeof(u32));
+    __uint(max_entries, 128);
+} xsks_map SEC(".maps");
+
 /// \brief One-to-one mapping of physical interfaces for bpf_redirect_map API.
 struct {
     __uint(type, BPF_MAP_TYPE_DEVMAP);

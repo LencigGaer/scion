@@ -341,7 +341,18 @@ int border_router(struct xdp_md* ctx)
     if (!this) return XDP_ABORTED;
 
     int verdict = process_packet(ctx, this);
-    if (verdict > 0) return verdict;
+    if (verdict == XDP_PASS)
+    {
+        // Redirect packet to slow path XSP socket if one is bound to the queue,
+        // otherwise pass to regular network stack.
+        u32 qid = ctx->rx_queue_index;
+        if (bpf_map_lookup_elem(&xsks_map, &qid))
+            return bpf_redirect_map(&xsks_map, qid, 0);
+        else
+            return verdict;
+    }
+    else if (verdict > 0)
+        return verdict;
 
 #ifdef ENABLE_HF_CHECK
     //////////////////////

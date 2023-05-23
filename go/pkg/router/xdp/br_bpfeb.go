@@ -70,6 +70,7 @@ type brMapSpecs struct {
 	PortStatsMap  *ebpf.MapSpec `ebpf:"port_stats_map"`
 	ScratchpadMap *ebpf.MapSpec `ebpf:"scratchpad_map"`
 	TxPortMap     *ebpf.MapSpec `ebpf:"tx_port_map"`
+	XsksMap       *ebpf.MapSpec `ebpf:"xsks_map"`
 }
 
 // brObjects contains all objects after they have been loaded into the kernel.
@@ -100,6 +101,7 @@ type brMaps struct {
 	PortStatsMap  *ebpf.Map `ebpf:"port_stats_map"`
 	ScratchpadMap *ebpf.Map `ebpf:"scratchpad_map"`
 	TxPortMap     *ebpf.Map `ebpf:"tx_port_map"`
+	XsksMap       *ebpf.Map `ebpf:"xsks_map"`
 }
 
 func (m *brMaps) Close() error {
@@ -113,6 +115,7 @@ func (m *brMaps) Close() error {
 		m.PortStatsMap,
 		m.ScratchpadMap,
 		m.TxPortMap,
+		m.XsksMap,
 	)
 }
 
