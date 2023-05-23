@@ -63,17 +63,19 @@ func interfaceByIp(ip net.IP) (*net.Interface, error) {
 	return nil, fmt.Errorf("no interface with IP %v found", ip)
 }
 
+// Packet/byte counters mirroring C.port_stats
+// TODO: export prometheus metrics
 type forwardingMetrics struct {
-	ForwardedBytes   uint64
-	ForwardedPackets uint64
+	Bytes   [C.COUNTER_ENUM_COUNT]uint64
+	Packets [C.COUNTER_ENUM_COUNT]uint64
 }
 
 // A port of the border router with an underlying interface and its XDP hook.
 type netInterface struct {
-	netIf   net.Interface     // Underlying network interface
-	link    link.Link         // Attached BPF program
-	xsks    map[int]int       // XDP socket FD for each queue
-	metrics forwardingMetrics // Forwarding metrics from XDP
+	netIf   net.Interface       // Underlying network interface
+	link    link.Link           // Attached BPF program
+	xsks    map[int]int         // XDP socket FD for each queue
+	metrics []forwardingMetrics // Forwarding metrics from XDP per CPU
 }
 
 // An internal interface is an interface to an AS-internal network.
@@ -501,6 +503,7 @@ func (d *Dataplane) Run(ctx context.Context) error {
 }
 
 // Add a network interface to the border router.
+// This is the only place where netInterface is instantiated.
 func (d *Dataplane) addNetInterface(ifindex int) (*netInterface, error) {
 	iface, present := d.netIfs[ifindex]
 	if !present {
@@ -513,8 +516,9 @@ func (d *Dataplane) addNetInterface(ifindex int) (*netInterface, error) {
 			return nil, serrors.WrapStr("interface not found", err)
 		}
 		d.netIfs[ifindex] = netInterface{
-			netIf: *netIf,
-			xsks:  make(map[int]int),
+			netIf:   *netIf,
+			xsks:    make(map[int]int),
+			metrics: make([]forwardingMetrics, runtime.NumCPU()),
 		}
 		iface = d.netIfs[ifindex]
 	}
@@ -689,21 +693,9 @@ func (d *Dataplane) writeHfKey(index int, key [16]byte) error {
 
 // Read port metrics from XDP dataplane.
 func (d *Dataplane) readPortStats() error {
-	// Fields must be exported
-	type portStats struct {
-		Bytes   [11]uint64
-		Packets [11]uint64
-	}
 	for ifindex, port := range d.netIfs {
-		value := make([]portStats, runtime.NumCPU())
-		if err := d.bpfObjs.PortStatsMap.Lookup((uint32)(ifindex), &value); err != nil {
+		if err := d.bpfObjs.PortStatsMap.Lookup((uint32)(ifindex), &port.metrics); err != nil {
 			return err
-		}
-		port.metrics.ForwardedBytes = 0
-		port.metrics.ForwardedPackets = 0
-		for _, stats := range value {
-			port.metrics.ForwardedBytes += (uint64)(stats.Bytes[C.COUNTER_SCION_FORWARD])
-			port.metrics.ForwardedPackets += (uint64)(stats.Packets[C.COUNTER_SCION_FORWARD])
 		}
 	}
 	return nil

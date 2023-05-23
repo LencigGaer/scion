@@ -81,16 +81,16 @@ int record_verdict(struct xdp_md *ctx, enum verdict verdict)
         printf("VERDICT: NOT_SCION (XDP_PASS)\n");
         break;
     case VERDICT_NOT_IMPLEMENTED:
-        printf("VERDICT: NOT_IMPLEMENTED (XDP_PASS)\n");
+        printf("VERDICT: NOT_IMPLEMENTED (XDP_REDIRECT)\n");
         break;
     case VERDICT_NO_INTERFACE:
         printf("VERDICT: NO_INTERFACE (XDP_DROP)\n");
         break;
     case VERDICT_UNDERLAY_MISMATCH:
-        printf("VERDICT: UNDERLAY_MISMATCH (XDP_PASS)\n");
+        printf("VERDICT: UNDERLAY_MISMATCH (XDP_REDIRECT)\n");
         break;
     case VERDICT_ROUTER_ALERT:
-        printf("VERDICT: ROUTER_ALERT (XDP_PASS)\n");
+        printf("VERDICT: ROUTER_ALERT (XDP_REDIRECT)\n");
         break;
     case VERDICT_FIB_LKUP_DROP:
         printf("VERDICT: FIB_LKUP_DROP (XDP_DROP)\n");
@@ -341,9 +341,9 @@ int border_router(struct xdp_md* ctx)
     if (!this) return XDP_ABORTED;
 
     int verdict = process_packet(ctx, this);
-    if (verdict == XDP_PASS)
+    if (verdict == XDP_REDIRECT)
     {
-        // Redirect packet to slow path XSP socket if one is bound to the queue,
+        // Redirect packet to slow path XDP socket if one is bound to the queue,
         // otherwise pass to regular network stack.
         u32 qid = ctx->rx_queue_index;
         if (bpf_map_lookup_elem(&xsks_map, &qid))
