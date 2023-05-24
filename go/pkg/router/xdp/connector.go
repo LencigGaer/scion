@@ -2,6 +2,8 @@ package xdp
 
 import (
 	"context"
+	"encoding/hex"
+	"fmt"
 	"net"
 	"sync"
 
@@ -94,7 +96,7 @@ func (x *XskObject) ReadBatch(msg conn.Messages) (int, error) {
 		}
 		for i := 0; i < len(rxDesc); i++ {
 			raw_pkt := x.xsk.GetFrame(rxDesc[i])
-			log.Debug("Slow path got packet", "pkt", raw_pkt)
+			log.Debug(fmt.Sprint("Slow path got packet:\n", hex.Dump(raw_pkt)))
 			msg[i].Buffers[0] = raw_pkt
 			msg[i].Addr = x.local
 			msg[i].N = 0
@@ -320,7 +322,7 @@ func (c *Connector) Run(ctx context.Context) error {
 	// Create a socket for each network interface
 	/*ifidxs := c.fast.GetIFindices()
 	xsks := make(map[int]*xdp.Socket, len(ifidxs))
-	for ifindex := range c.fast.GetIFindices() {
+	for _, ifindex := range c.fast.GetIFindices() {
 		xsk, err := xdp.NewSocket(ifidxs[ifindex], 0, nil)
 		if err != nil {
 			log.Error("Failed to create XDP socket", "err", err)
@@ -342,7 +344,7 @@ func (c *Connector) Run(ctx context.Context) error {
 					rxDescs := xsk.Receive(numRx)
 					for i := 0; i < len(rxDescs); i++ {
 						pkt := xsk.GetFrame(rxDescs[i])
-						log.Debug("Slow path got packet", "pkt", pkt)
+						log.Debug(fmt.Sprint("Slow path got packet:\n", hex.Dump(pkt)))
 					}
 				}
 			}

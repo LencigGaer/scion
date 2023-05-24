@@ -1,0 +1,66 @@
+load("//lint:go.bzl", "go_library")
+
+go_library(
+    name = "go_default_library",
+    srcs = [
+        "br_bpfeb.go",
+        "br_bpfel.go",
+        "connector.go",
+        "dataplane.go",
+    ],
+    cgo = True,
+    clinkopts = ["go/pkg/router/xdp/aes.o"],
+    embedsrcs = select({
+        "@io_bazel_rules_go//go/platform:386": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:amd64": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:arm": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:arm64": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:mips": [
+            "br_bpfeb.o",
+        ],
+        "@io_bazel_rules_go//go/platform:mips64": [
+            "br_bpfeb.o",
+        ],
+        "@io_bazel_rules_go//go/platform:mips64le": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:mipsle": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:ppc64": [
+            "br_bpfeb.o",
+        ],
+        "@io_bazel_rules_go//go/platform:ppc64le": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:riscv64": [
+            "br_bpfel.o",
+        ],
+        "@io_bazel_rules_go//go/platform:s390x": [
+            "br_bpfeb.o",
+        ],
+        "//conditions:default": [],
+    }),
+    importpath = "github.com/scionproto/scion/go/pkg/router/xdp",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//go/lib/addr:go_default_library",
+        "//go/lib/common:go_default_library",
+        "//go/lib/log:go_default_library",
+        "//go/lib/serrors:go_default_library",
+        "//go/lib/topology:go_default_library",
+        "//go/pkg/router/control:go_default_library",
+        "@com_github_asavie_xdp//:go_default_library",
+        "@com_github_cilium_ebpf//:go_default_library",
+        "@com_github_cilium_ebpf//link:go_default_library",
+        "@com_github_cilium_ebpf//ringbuf:go_default_library",
+    ],
+)

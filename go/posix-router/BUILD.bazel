@@ -16,6 +16,7 @@ go_library(
         "//go/pkg/router/api:go_default_library",
         "//go/pkg/router/config:go_default_library",
         "//go/pkg/router/control:go_default_library",
+        "//go/pkg/router/xdp:go_default_library",
         "//go/pkg/service:go_default_library",
         "@com_github_go_chi_chi_v5//:go_default_library",
         "@com_github_go_chi_cors//:go_default_library",

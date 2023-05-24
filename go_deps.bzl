@@ -69,6 +69,12 @@ def go_deps():
         version = "v1.0.0",
     )
     go_repository(
+        name = "com_github_asavie_xdp",
+        importpath = "github.com/asavie/xdp",
+        sum = "h1:b5Aa3EkMJYBeUO5TxPTIAa4wyUqYcsQr2s8f6YLJXhE=",
+        version = "v0.3.3",
+    )
+    go_repository(
         name = "com_github_azure_go_ansiterm",
         importpath = "github.com/Azure/go-ansiterm",
         sum = "h1:w+iIsaOQNcT7OZ575w+acHgRric5iCyQh+xv+KJ4HB8=",
@@ -175,6 +181,12 @@ def go_deps():
         importpath = "github.com/chzyer/test",
         sum = "h1:q763qf9huN11kDQavWsoZXJNW3xEE4JJyHa5Q25/sd8=",
         version = "v0.0.0-20180213035817-a1ea475d72b1",
+    )
+    go_repository(
+        name = "com_github_cilium_ebpf",
+        importpath = "github.com/cilium/ebpf",
+        sum = "h1:nk5HPMeoBXtOzbkZBWym+ZWq1GIiHUsBFXxwewXAHLQ=",
+        version = "v0.10.0",
     )
     go_repository(
         name = "com_github_client9_misspell",
@@ -405,6 +417,12 @@ def go_deps():
         version = "v1.2.13",
     )
     go_repository(
+        name = "com_github_frankban_quicktest",
+        importpath = "github.com/frankban/quicktest",
+        sum = "h1:g2rn0vABPOOXmZUj+vbmUp0lPoXEMuhTpIluN0XL9UY=",
+        version = "v1.14.4",
+    )
+    go_repository(
         name = "com_github_fsnotify_fsnotify",
         importpath = "github.com/fsnotify/fsnotify",
         sum = "h1:mZcQUHVQUQWoPXXtuf9yuEXKudkV2sx1E06UadKWpgI=",
@@ -623,8 +641,8 @@ def go_deps():
     go_repository(
         name = "com_github_google_go_cmp",
         importpath = "github.com/google/go-cmp",
-        sum = "h1:BKbKCqvP6I+rmFHt06ZmyQtvB8xAkWdhFyr0ZUNZcxQ=",
-        version = "v0.5.6",
+        sum = "h1:O2Tfq5qg4qc4AmwVlvv0oLiVAGB7enBSJ2x2DqQFi38=",
+        version = "v0.5.9",
     )
     go_repository(
         name = "com_github_google_go_containerregistry",
@@ -653,8 +671,8 @@ def go_deps():
     go_repository(
         name = "com_github_google_gopacket",
         importpath = "github.com/google/gopacket",
-        sum = "h1:eR3RuANqlK0CQoHJxUdXQNsco+gJykcti01+wqBCuPs=",
-        version = "v1.1.16-0.20190123011826-102d5ca2098c",
+        sum = "h1:ves8RnFZPGiFnTS0uPQStjwru6uO6h+nlr9j6fL7kF8=",
+        version = "v1.1.19",
     )
     go_repository(
         name = "com_github_google_martian",
@@ -977,8 +995,8 @@ def go_deps():
     go_repository(
         name = "com_github_kr_pretty",
         importpath = "github.com/kr/pretty",
-        sum = "h1:WgNl7dwNpEZ6jJ9k1snq4pZsg7DOEN8hP9Xw0Tsjwk0=",
-        version = "v0.3.0",
+        sum = "h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=",
+        version = "v0.3.1",
     )
     go_repository(
         name = "com_github_kr_pty",
@@ -1157,8 +1175,8 @@ def go_deps():
     go_repository(
         name = "com_github_miekg_dns",
         importpath = "github.com/miekg/dns",
-        sum = "h1:gPxPSwALAeHJSjarOs00QjVdV9QoBvc1D2ujQUr5BzU=",
-        version = "v1.1.26",
+        sum = "h1:oTfOaDH+mZkdcgdIjH6yBajRGtIwcwcaR+rt23ZSrJs=",
+        version = "v1.1.35",
     )
     go_repository(
         name = "com_github_mitchellh_cli",
@@ -1403,8 +1421,8 @@ def go_deps():
     go_repository(
         name = "com_github_rogpeppe_go_internal",
         importpath = "github.com/rogpeppe/go-internal",
-        sum = "h1:FCbCCtXNOY3UtUuHUYaghJg4y7Fd14rXifAYUAtL9R8=",
-        version = "v1.8.0",
+        sum = "h1:73kH8U+JUqXU8lRuOHeVHaa/SZPifC7BkcraZVejAe8=",
+        version = "v1.9.0",
     )
     go_repository(
         name = "com_github_russross_blackfriday",
@@ -2159,8 +2177,8 @@ def go_deps():
     go_repository(
         name = "org_golang_x_sys",
         importpath = "golang.org/x/sys",
-        sum = "h1:fLOSk5Q00efkSvAm+4xcoXD+RRmLmmulPn5I3Y9F2EM=",
-        version = "v0.0.0-20211216021012-1d35b9e2eb4e",
+        sum = "h1:ljd4t30dBnAvMZaQCevtY0xLLD0A+bRZXbgLMLU1F/A=",
+        version = "v0.2.0",
     )
     go_repository(
         name = "org_golang_x_term",
