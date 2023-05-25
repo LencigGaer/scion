@@ -33,14 +33,14 @@ type Connector struct {
 const receiveBufferSize = 1 << 20
 
 type XskObject struct {
-	xsk       *xdp.Socket
-	program   *xdp.Program
-	link      netlink.Link
-	local     net.Addr
-	batchConn conn.Conn
+	xsk     *xdp.Socket
+	program *xdp.Program
+	link    netlink.Link
+	local   net.Addr
 }
 
 var errMultiIA = serrors.New("different IA not allowed")
+var errDescGet = serrors.New("Could not get XDP descriptor.")
 
 // Create XSK socket for reading and batch connection for sending
 func (c *Connector) CreateXskConn(local net.UDPAddr) (*XskObject, error) {
@@ -68,12 +68,6 @@ func (c *Connector) CreateXskConn(local net.UDPAddr) (*XskObject, error) {
 	}
 	c.fast.RegisterXdpSocket(x.link.Attrs().Index, 0, x.xsk.FD())
 
-	// Create normal batch connection for sending
-	x.batchConn, err = conn.New(&local, nil,
-		&conn.Config{ReceiveBufferSize: receiveBufferSize})
-	if err != nil {
-		return x, err
-	}
 	return x, nil
 }
 
@@ -107,20 +101,53 @@ func (x *XskObject) ReadBatch(msg conn.Messages) (int, error) {
 	return 0, nil
 }
 
-// Write bytes to interface
+// Write bytes to XDP socket
 func (x *XskObject) WriteTo(raw_pkt []byte, address *net.UDPAddr) (int, error) {
-	return x.batchConn.WriteTo(raw_pkt, address)
+	var txDesc []xdp.Desc
+	if n := x.xsk.NumFreeTxSlots(); n > 0 {
+		txDesc = x.xsk.GetDescs(1)
+	} else {
+		return 0, errDescGet
+	}
+	if len(txDesc) == 0 {
+		return 0, serrors.WrapStr("Received descriptor with length 0!", errDescGet)
+	}
+	frame := x.xsk.GetFrame(txDesc[0])
+	for i := 0; i < len(raw_pkt); i++ {
+		frame[i] = raw_pkt[i]
+	}
+	n := x.xsk.Transmit(txDesc)
+	if n == 0 {
+		return 0, nil
+	}
+	log.Debug("WriteTo transmitted n packages:", "n", n)
+	return len(raw_pkt), nil
 }
 
 // Write batch to interface
 func (x *XskObject) WriteBatch(msgs conn.Messages, flags int) (int, error) {
-	return x.batchConn.WriteBatch(msgs, flags)
+	var txDesc []xdp.Desc
+	if n := x.xsk.NumFreeTxSlots(); n >= len(msgs) {
+		txDesc = x.xsk.GetDescs(len(msgs))
+	} else {
+		return 0, errDescGet
+	}
+	for i := 0; i < len(msgs); i++ {
+		frame := x.xsk.GetFrame(txDesc[i])
+		raw_pkt := msgs[i].Buffers[0]
+		for j := 0; i < len(raw_pkt); i++ {
+			frame[j] = raw_pkt[j]
+		}
+	}
+	n := x.xsk.Transmit(txDesc)
+	log.Debug("WriteBatch transmitted n packages:", "n", n)
+	return n, nil
 }
 
 // Detach XDP prog and close connection
 func (x *XskObject) Close() error {
 	x.xsk.Close()
-	return x.batchConn.Close()
+	return nil
 }
 
 func (c *Connector) CreateIACtx(ia addr.IA) error {
